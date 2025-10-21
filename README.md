@@ -24,3 +24,8 @@ BurpJSLinkFinder-Enhanced is a Burp Suite extension (Jython 2.7) that extracts e
 - Jython standalone JAR configured in Burp
 
 - Drop the .py file into Burp Extender and enable the extension
+
+# Improves identification of sensitive keys
+
+https://github.com/user-attachments/assets/ba8976cc-4f77-4641-acd2-360bd16f123e
+
