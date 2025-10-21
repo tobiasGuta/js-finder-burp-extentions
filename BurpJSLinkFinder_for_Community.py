@@ -111,6 +111,10 @@ class SearchFocusAdapter(FocusAdapter):
             pass
 
 class BurpExtender(IBurpExtender, IHttpListener, ITab):
+    def __init__(self):
+        # ...existing code...
+        self._search_timer = None
+        self._search_lock = threading.Lock()
 
     def registerExtenderCallbacks(self, callbacks):
         self._callbacks = callbacks
@@ -292,9 +296,18 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
     # ----------------- search (live) action -----------------
     def _on_search_key(self, event):
         try:
-            safe_print(self.stdout, "[BurpJSLinkFinder] _on_search_key fired; text='%s'" % str(self.searchField.getText()))
-            # live updates should NOT steal focus from the search field
-            self._apply_search(focus_log=False)
+            # Debounce: only apply search 200ms after last keypress
+            def delayed_search():
+                time.sleep(0.2)
+                with self._search_lock:
+                    if threading.current_thread() == self._search_timer:
+                        EventQueue.invokeLater(lambda: self._apply_search(focus_log=False))
+            with self._search_lock:
+                if hasattr(self, '_search_timer') and self._search_timer:
+                    self._search_timer = None  # Cancel previous
+                t = threading.Thread(target=delayed_search)
+                self._search_timer = t
+                t.start()
         except Exception as e:
             safe_print(self.stderr, "Search error: " + str(e))
 
@@ -334,18 +347,28 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 arr.add(f)
             sorter.setRowFilter(RowFilter.orFilter(arr))
 
-        # Only move focus / select in the log when explicitly requested (Enter)
+        # Only search/select in the log when Enter is pressed (not on every keypress)
         if text_l and focus_log:
-            log_lower = str(self.logArea.getText()).lower()
+            # Only search the last 100KB of the log for performance
+            log_text = str(self.logArea.getText())
+            max_search = 100000  # 100KB
+            if len(log_text) > max_search:
+                log_lower = log_text[-max_search:].lower()
+                offset = len(log_text) - max_search
+            else:
+                log_lower = log_text.lower()
+                offset = 0
             idx = log_lower.find(text_l)
             if idx != -1:
-                start = idx
-                end = idx + len(text_l)
+                start = offset + idx
+                end = start + len(text_l)
                 self.logArea.requestFocus()
                 self.logArea.select(start, end)
                 self.logArea.setCaretPosition(end)
+            else:
+                # Optionally, deselect if not found
+                self.logArea.select(0, 0)
         elif not text_l:
-            # keep log selection cleared, but don't steal focus
             self.logArea.select(0, 0)
 
     def _clear_search(self, event):
