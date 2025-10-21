@@ -11,7 +11,7 @@ from java.awt.event import FocusAdapter, KeyAdapter, MouseAdapter, MouseEvent
 from javax.swing import JTable, JScrollPane, JPopupMenu, JMenuItem, JFileChooser, JOptionPane
 from javax.swing import RowFilter
 from java.util import ArrayList
-from javax.swing.table import DefaultTableModel
+from javax.swing.table import DefaultTableModel, DefaultTableCellRenderer
 from java.awt.datatransfer import StringSelection
 from java.awt import Toolkit
 from java.net import URI
@@ -226,6 +226,37 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self.panel.add(scroll)
         self.panel.add(swing.JLabel("Log:"))
         self.panel.add(logScroll)
+
+        class HighlightRenderer(DefaultTableCellRenderer):
+            def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column):
+                c = DefaultTableCellRenderer.getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column)
+                try:
+                    if column == 0 and value:
+                        if str(value).startswith("[PRIVATE KEY FOUND]"):
+                            c.setBackground(Color.RED)
+                            c.setForeground(Color.WHITE)
+                        elif str(value).startswith("[AWS KEY FOUND]"):
+                            c.setBackground(Color.ORANGE)
+                            c.setForeground(Color.BLACK)
+                        else:
+                            if isSelected:
+                                c.setBackground(table.getSelectionBackground())
+                                c.setForeground(table.getSelectionForeground())
+                            else:
+                                c.setBackground(Color.WHITE)
+                                c.setForeground(Color.BLACK)
+                    else:
+                        if isSelected:
+                            c.setBackground(table.getSelectionBackground())
+                            c.setForeground(table.getSelectionForeground())
+                        else:
+                            c.setBackground(Color.WHITE)
+                            c.setForeground(Color.BLACK)
+                except:
+                    pass
+                return c
+
+        self.table.getColumnModel().getColumn(0).setCellRenderer(HighlightRenderer())
 
     def getTabCaption(self):
         return "BurpJSLinkFinder"
@@ -598,6 +629,33 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             if dec:
                 for m in re.finditer(self.linkfinder_regex, dec):
                     items.append({"link": m.group(1)})
+        # --- Private key detection ---
+        private_key_patterns = [
+            r'-----BEGIN OPENSSH PRIVATE KEY-----.*?-----END OPENSSH PRIVATE KEY-----',
+            r'-----BEGIN RSA PRIVATE KEY-----.*?-----END RSA PRIVATE KEY-----',
+            r'-----BEGIN DSA PRIVATE KEY-----.*?-----END DSA PRIVATE KEY-----',
+            r'-----BEGIN EC PRIVATE KEY-----.*?-----END EC PRIVATE KEY-----',
+            r'-----BEGIN PRIVATE KEY-----.*?-----END PRIVATE KEY-----',
+        ]
+        for pk_pat in private_key_patterns:
+            for m in re.finditer(pk_pat, content, re.DOTALL):
+                key_block = m.group(0)
+                # Only show the header in the table for brevity, and set priority to CRITICAL
+                items.append({"link": "[PRIVATE KEY FOUND] " + key_block.split('\n')[0], "priority": "CRITICAL"})
+
+        # --- AWS credential detection ---
+        aws_patterns = [
+            r'aws_access_key_id\s*=\s*(AKIA[0-9A-Z]{16})',
+            r'aws_secret_access_key\s*=\s*([A-Za-z0-9/+=]{40})',
+        ]
+        for aws_pat in aws_patterns:
+            for m in re.finditer(aws_pat, content):
+                key_val = m.group(0)
+                items.append({
+                    "link": "[AWS KEY FOUND] " + key_val,
+                    "priority": "CRITICAL"
+                })
+
         # dedupe per file
         seen = set()
         nodup = []
@@ -605,7 +663,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             link = it.get('link')
             if link and link not in seen:
                 seen.add(link)
-                nodup.append({'link': link})
+                nodup.append(it)  # Keep the full dict, including priority if present
         return nodup[:MAX_RESULTS_PER_FILE]
 
     # ----------------- probing (HEAD) -----------------
@@ -666,18 +724,22 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             analyzed = self._helpers.analyzeResponse(response)
             if analyzed is None:
                 return
-            mime = analyzed.getStatedMimeType()
+            # REMOVE or comment out the JS-only checks below:
+            # mime = analyzed.getStatedMimeType()
+            # url = self._helpers.analyzeRequest(messageInfo).getUrl()
+            # url_str = str(url)
+            # is_js = False
+            # if mime and mime.lower() == 'script':
+            #     is_js = True
+            # if url_str.lower().endswith(".js"):
+            #     is_js = True
+            # if not is_js:
+            #     return
+            # if any(x in url_str for x in JS_EXCLUDE):
+            #     return
+
             url = self._helpers.analyzeRequest(messageInfo).getUrl()
             url_str = str(url)
-            is_js = False
-            if mime and mime.lower() == 'script':
-                is_js = True
-            if url_str.lower().endswith(".js"):
-                is_js = True
-            if not is_js:
-                return
-            if any(x in url_str for x in JS_EXCLUDE):
-                return
             body_offset = analyzed.getBodyOffset()
             body_bytes = response[body_offset:]
             body = self._helpers.bytesToString(body_bytes)
@@ -688,24 +750,8 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 ep = item.get('link')
                 if not ep:
                     continue
-                if ep.startswith("//"):
-                    ep = "https:" + ep
-                if ep.startswith("/") and not ep.startswith("//"):
-                    try:
-                        from java.net import URL
-                        base = URL(url_str)
-                        proto = base.getProtocol()
-                        host = base.getHost()
-                        port = base.getPort()
-                        if port == -1:
-                            ep_full = "%s://%s%s" % (proto, host, ep)
-                        else:
-                            ep_full = "%s://%s:%d%s" % (proto, host, port, ep)
-                        ep = ep_full
-                    except:
-                        pass
-                ep = ep.strip('"\'` ')
-                priority = "LOW"
+                # Set priority to CRITICAL if present in item (e.g., for private keys)
+                priority = item.get("priority", "LOW")
                 ctx = ""
                 try:
                     mpos = body.find(item.get('link'))
