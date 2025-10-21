@@ -238,6 +238,9 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                         elif str(value).startswith("[AWS KEY FOUND]"):
                             c.setBackground(Color.ORANGE)
                             c.setForeground(Color.BLACK)
+                        elif str(value).startswith("[SUSPICIOUS ENDPOINT FOUND]"):
+                            c.setBackground(Color(102, 0, 204))  # Purple
+                            c.setForeground(Color.WHITE)
                         else:
                             if isSelected:
                                 c.setBackground(table.getSelectionBackground())
@@ -601,7 +604,25 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         '''
 
     def parser_file(self, content):
-        items = [{"link": m.group(1)} for m in re.finditer(self.linkfinder_regex, content)]
+        items = []
+
+        # --- Suspicious/hidden endpoint detection in JS ---
+        suspicious_func_patterns = [
+            r'\$http\.(get|post|put|delete)\s*\(\s*[\'"](/[^\'"]+)[\'"]',
+            r'fetch\s*\(\s*[\'"](/[^\'"]+)[\'"]',
+            r'axios\.(get|post|put|delete)\s*\(\s*[\'"](/[^\'"]+)[\'"]',
+            r'\.open\s*\(\s*[\'"](POST|GET|PUT|DELETE)[\'"]\s*,\s*[\'"](/[^\'"]+)[\'"]',
+        ]
+        for pat in suspicious_func_patterns:
+            for m in re.finditer(pat, content):
+                endpoint = m.groups()[-1]
+                items.append({
+                    "link": "[SUSPICIOUS ENDPOINT FOUND] " + endpoint,
+                    "priority": "HIGH"
+                })
+
+        # --- Generic patterns ---
+        items += [{"link": m.group(1)} for m in re.finditer(self.linkfinder_regex, content)]
         # also check simple patterns for faster catches or fallback
         for p in self.simple_patterns:
             for m in p.finditer(content):
