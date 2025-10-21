@@ -267,6 +267,22 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                         elif str(value).startswith("[CONFIG ENDPOINT FOUND]"):
                             c.setBackground(Color(0, 153, 153))  # Teal
                             c.setForeground(Color.WHITE)
+
+                        # -- Added token highlights --
+                        elif str(value).startswith("[JWT FOUND]"):
+                            c.setBackground(Color(153, 0, 0))  # Dark red
+                            c.setForeground(Color.WHITE)
+                        elif str(value).startswith("[AUTH BEARER FOUND]"):
+                            c.setBackground(Color(255, 102, 0))  # Orange
+                            c.setForeground(Color.BLACK)
+                        elif str(value).startswith("[NAMED TOKEN FOUND]"):
+                            c.setBackground(Color(204, 102, 255))  # Light purple
+                            c.setForeground(Color.BLACK)
+                        elif str(value).startswith("[HIGH-ENTROPY TOKEN (context)]"):
+                            c.setBackground(Color(255, 204, 0))  # Yellow
+                            c.setForeground(Color.BLACK)
+                        # -- end added token highlights --
+
                         else:
                             if isSelected:
                                 c.setBackground(table.getSelectionBackground())
@@ -775,6 +791,112 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             # consider long/high-entropy values as suspicious
             if ent >= 3.5 or len(val) >= 30:
                 items.append({"link": "[AWS KEY FOUND] (near key) %s (conf=%s)" % (_mask(val), "HIGH" if ent >= 3.5 else "MEDIUM"), "priority": "CRITICAL" if ent >= 3.5 else "MEDIUM"})
+
+        # --- Added: strict-mode token detection (JWT, Bearer, key-name + high-entropy, context-checked fallback) ---
+        try:
+            # small helper to reduce false-positives for generic high-entropy blobs
+            def _is_likely_token(s, ent):
+                s2 = s.strip()
+                # discard pure hex hashes (common FP)
+                if re.match(r'^[0-9a-fA-F]{20,}$', s2):
+                    # except very long hex with explicit "key" nearby could still be interesting,
+                    # but treat as FP here to reduce noise
+                    return False
+                # discard common fixed-length hex hashes explicitly (MD5/SHA1/SHA256)
+                if len(s2) in (32, 40, 64) and re.match(r'^[0-9a-fA-F]{%d}$' % len(s2), s2):
+                    return False
+                # prefer blobs that look like base64/base64url (have +/ or = padding or -_)
+                if re.search(r'[+/=]', s2) or re.search(r'[-_]', s2):
+                    return True
+                # otherwise require higher entropy for non-base64-like strings
+                return ent >= 3.7
+
+            # JWT detection (stricter): require base64url-like characteristics and skip obvious hostnames / JS globals
+            jwt_re = re.compile(r'\b([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\b')
+            # common JS globals / helpers that produce dotted identifiers which are not tokens
+            js_globals = ['window', 'document', 'localstorage', 'sessionstorage', 'console', 'setitem', 'getitem', 'location', 'navigator']
+            for m in jwt_re.finditer(content):
+                token = m.group(1)
+                if not token or len(token) <= 20:
+                    continue
+                t_lower = token.lower()
+                # skip obvious JS dotted expressions (window.sessionStorage.setItem etc.)
+                if any(g in t_lower for g in js_globals):
+                    continue
+                # skip obvious hostnames (lowercase, alnum/hyphen/dot only) - common FP
+                if '.' in token and re.match(r'^[a-z0-9\-.]+$', token):
+                    # also skip if it ends with a TLD-like suffix
+                    if re.search(r'\.[a-z]{2,6}$', token) or 'execute-api' in t_lower or 'amazonaws' in t_lower or token == token.lower():
+                        continue
+                # prefer tokens that contain base64/base64url characters or padding (+/=_-)
+                if not re.search(r'[-_=+/]', token):
+                    compact_tmp = token.replace('.', '')
+                    if _shannon_entropy(compact_tmp) < 3.5:
+                        continue
+                compact = token.replace('.', '')
+                ent = _shannon_entropy(compact)
+                if ent >= 3.2 and len(compact) >= 20:
+                    items.append({"link": "[JWT FOUND] %s" % (token), "priority": "HIGH"})
+
+            # Authorization: Bearer tokens in common JS/JSON forms
+            for m in re.finditer(r'["\']Authorization["\']\s*[:=]\s*["\']Bearer\s+([A-Za-z0-9\-\._~\+/=]+?)["\']', content, re.IGNORECASE):
+                tok = m.group(1)
+                if tok:
+                    ent = _shannon_entropy(tok)
+                    if not _is_likely_token(tok, ent):
+                        continue
+                    pr = "HIGH" if ent >= 3.5 or len(tok) >= 30 else "MEDIUM"
+                    items.append({"link": "[AUTH BEARER FOUND] %s (conf=%s)" % (_mask(tok), "HIGH" if pr == "HIGH" else "MEDIUM"), "priority": pr})
+            for m in re.finditer(r'["\']Bearer\s+([A-Za-z0-9\-\._~\+/=]{16,})["\']', content):
+                tok = m.group(1)
+                if tok:
+                    ent = _shannon_entropy(tok)
+                    if not _is_likely_token(tok, ent):
+                        continue
+                    pr = "HIGH" if ent >= 3.5 or len(tok) >= 30 else "MEDIUM"
+                    items.append({"link": "[AUTH BEARER FOUND] %s (conf=%s)" % (_mask(tok), "HIGH" if pr == "HIGH" else "MEDIUM"), "priority": pr})
+
+            # key-name + high-entropy value (strict: key-like name followed by quoted value)
+            keyname_val_re = re.compile(r'["\']?([A-Za-z0-9_\-]*?(?:key|token|secret|api|auth)[A-Za-z0-9_\-]*)["\']?\s*[:=]\s*["\']([A-Za-z0-9/+=\-_]{16,})["\']', re.IGNORECASE)
+            for m in keyname_val_re.finditer(content):
+                name = m.group(1)
+                val = m.group(2)
+                ent = _shannon_entropy(val)
+                if not _is_likely_token(val, ent):
+                    continue
+                if ent >= 3.2 or len(val) >= 20:
+                    pr = "CRITICAL" if ent >= 3.5 or len(val) >= 40 else "HIGH"
+                    items.append({"link": "[NAMED TOKEN FOUND] %s: %s (conf=%s)" % (name, _mask(val), "HIGH" if pr in ("CRITICAL","HIGH") else "MEDIUM"), "priority": pr})
+
+            # Context-checked high-entropy fallback:
+            # Find quoted high-entropy blobs and only flag them if nearby keywords exist.
+            # Add stricter heuristics to avoid favicon / resource hash false-positives and plain hex hashes.
+            candidate_re = re.compile(r'["\']([A-Za-z0-9/+=\-_]{20,})["\']')
+            keywords = ['auth', 'token', 'secret', 'api', 'key', 'bearer', 'authorization', 'session', 'credential', 'access', 'secret']
+            for m in candidate_re.finditer(content):
+                cand = m.group(1)
+                ent = _shannon_entropy(cand)
+                # quick skip: pure hex or known-length hash looks like FP
+                if not _is_likely_token(cand, ent):
+                    continue
+                # context window (narrower than before to reduce accidental hits)
+                start = max(0, m.start() - 40)
+                end = min(len(content), m.end() + 40)
+                ctx = content[start:end].lower()
+                # skip obvious resource contexts (favicon, .png, .ico, .svg, data:image, url path)
+                if 'favicon' in ctx or '.ico' in ctx or '.png' in ctx or '.svg' in ctx or 'data:image' in ctx or '/static/' in ctx or '/assets/' in ctx:
+                    continue
+                # require a nearby keyword within the narrow window
+                if not any(k in ctx for k in keywords):
+                    continue
+                # also avoid blobs that look embedded in URLs or path segments without explicit key context
+                if re.search(r'https?://', ctx) and '/' in ctx and ctx.count('/') > 2 and not any(k in ctx for k in ['token', 'auth', 'key', 'secret']):
+                    continue
+                pr = "HIGH" if ent >= 3.5 or len(cand) >= 30 else "MEDIUM"
+                items.append({"link": "[HIGH-ENTROPY TOKEN (context)] %s (conf=%s)" % (_mask(cand), "HIGH" if pr == "HIGH" else "MEDIUM"), "priority": pr})
+        except Exception:
+            # keep parser robust; don't let detection failures block other checks
+            pass
 
         # dedupe per file
         seen = set()
