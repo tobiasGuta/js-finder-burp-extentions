@@ -21,6 +21,7 @@ import time
 import base64
 import binascii
 import json
+import math
 
 # Config
 JS_EXCLUDE = ['jquery', 'google-analytics', 'gpt.js', 'analytics.js', 'gtag', 'google-analytics.com']
@@ -61,6 +62,20 @@ def attempt_hex_decode(s):
     except Exception:
         pass
     return None
+
+# new: lightweight Shannon entropy estimator
+def _shannon_entropy(s):
+    if not s:
+        return 0.0
+    freq = {}
+    for ch in s:
+        freq[ch] = freq.get(ch, 0) + 1
+    entropy = 0.0
+    length = float(len(s))
+    for v in freq.values():
+        p = v / length
+        entropy -= p * math.log(p, 2)
+    return entropy
 
 # KeyAdapter wrapper (must be defined for addKeyListener)
 class SearchKeyAdapter(KeyAdapter):
@@ -190,6 +205,9 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
 
         self.clearSearchBtn = swing.JButton("Clear Search", actionPerformed=self._clear_search)
 
+        # new: clear log button
+        self.clearLogBtn = swing.JButton("Clear Log", actionPerformed=self._clear_log)
+
         # remaining controls
         self.probeToggle = swing.JToggleButton("Probe HEAD (off)", actionPerformed=self._toggle_probe)
         if self._probe_enabled:
@@ -203,6 +221,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         top.add(self.filterField)
         top.add(self.searchField)
         top.add(self.clearSearchBtn)
+        top.add(self.clearLogBtn)
         top.add(self.probeToggle)
         top.add(self.clearBtn)
         top.add(self.exportCsvBtn)
@@ -597,6 +616,22 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self._all_rows = []
         self.append_log("Cleared results.")
 
+    def _clear_log(self, event):
+        try:
+            # clear UI log
+            self.logArea.setText("")
+            # also clear the results table and internal storage so the UI above is cleared
+            try:
+                self.tableModel.setRowCount(0)
+            except:
+                pass
+            self._seen = set()
+            self._all_rows = []
+            # print to stdout instead of appending to UI log (keeps log area empty)
+            safe_print(self.stdout, "Log and results cleared.")
+        except Exception as e:
+            safe_print(self.stderr, "Clear log error: " + str(e))
+
     def append_log(self, text):
         try:
             self.logArea.append(str(text) + "\n")
@@ -690,58 +725,56 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 # Only show the header in the table for brevity, and set priority to CRITICAL
                 items.append({"link": "[PRIVATE KEY FOUND] " + key_block.split('\n')[0], "priority": "CRITICAL"})
 
-        # --- AWS credential detection ---
-        aws_patterns = [
-            r'aws_access_key_id\s*=\s*(AKIA[0-9A-Z]{16})',
-            r'aws_secret_access_key\s*=\s*([A-Za-z0-9/+=]{40})',
-        ]
-        for aws_pat in aws_patterns:
-            for m in re.finditer(aws_pat, content):
-                key_val = m.group(0)
-                items.append({
-                    "link": "[AWS KEY FOUND] " + key_val,
-                    "priority": "CRITICAL"
-                })
+        # --- AWS credential detection (improved) ---
+        # Look for common access keys, secrets, session tokens and ARNs in many styles.
+        def _mask(v):
+            try:
+                vs = str(v)
+                if len(vs) > 12:
+                    return vs[:4] + "..." + vs[-4:]
+                return vs
+            except:
+                return "****"
 
-        # --- Config-style endpoint detection ---
-        config_keys = [
-            "path", "linkUrl", "anonRedirectPath", "baseUrl", "anonRedirect", "redirectPath"
-        ]
-        array_keys = [
-            "allowedRoutes", "routes"
-        ]
-        # Match: "path": "something", 'path': 'something', etc. (even without leading slash)
-        config_pattern = re.compile(
-            r'["\'](' + '|'.join(config_keys) + r')["\']\s*:\s*["\']([^"\']+)["\']',
-            re.IGNORECASE
-        )
-        for m in config_pattern.finditer(content):
-            endpoint = m.group(2)
-            # Highlight all, but if not absolute, add a note
-            label = "[CONFIG ENDPOINT FOUND] "
-            if not endpoint.startswith("/") and not endpoint.startswith("http"):
-                label += "(relative) "
-            items.append({
-                "link": label + endpoint,
-                "priority": "MEDIUM"
-            })
+        # direct AKIA / ASIA tokens
+        for m in re.finditer(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b', content):
+            val = m.group(0)
+            ent = _shannon_entropy(val)
+            conf = "HIGH" if ent > 3.5 else "MEDIUM"
+            items.append({"link": "[AWS KEY FOUND] accessKeyId: %s (conf=%s)" % (_mask(val), conf), "priority": "CRITICAL" if conf == "HIGH" else "MEDIUM"})
 
-        # Match arrays: allowedRoutes: ["/reset-password", "/new-password"], routes: ["reset-password", ...]
-        array_pattern = re.compile(
-            r'["\'](' + '|'.join(array_keys) + r')["\']\s*:\s*\[([^\]]+)\]',
-            re.IGNORECASE
-        )
-        for m in array_pattern.finditer(content):
-            arr_content = m.group(2)
-            # Find all string values in the array
-            for ep in re.findall(r'["\']([^"\']+)["\']', arr_content):
-                label = "[CONFIG ENDPOINT FOUND] "
-                if not ep.startswith("/") and not ep.startswith("http"):
-                    label += "(relative) "
-                items.append({
-                    "link": label + ep,
-                    "priority": "MEDIUM"
-                })
+        # JSON/JS style key-value pairs (accessKeyId / secretAccessKey / aws_session_token)
+        json_key_patterns = [
+            (r'["\'](?:accessKeyId|aws_access_key_id|access_key_id)["\']\s*[:=]\s*["\']?((?:AKIA|ASIA)[0-9A-Z]{16})["\']?', "accessKeyId"),
+            (r'["\'](?:secretAccessKey|aws_secret_access_key|secret_key)["\']\s*[:=]\s*["\']?([A-Za-z0-9/+=]{20,})["\']?', "secretAccessKey"),
+            (r'["\']aws_session_token["\']\s*[:=]\s*["\']?([A-Za-z0-9/+=]{16,})["\']?', "sessionToken"),
+        ]
+        for pat, typ in json_key_patterns:
+            for m in re.finditer(pat, content, re.IGNORECASE):
+                val = m.group(1)
+                if not val:
+                    continue
+                ent = _shannon_entropy(val)
+                conf = "HIGH" if ent > 3.5 or len(val) >= 40 else "MEDIUM"
+                prio = "CRITICAL" if typ != "sessionToken" and conf == "HIGH" else ("HIGH" if typ == "sessionToken" and conf == "HIGH" else "MEDIUM")
+                items.append({"link": "[AWS KEY FOUND] %s: %s (conf=%s)" % (typ, _mask(val), conf), "priority": prio})
+
+        # ARN detection
+        for m in re.finditer(r'\barn:aws:[a-z0-9-:\/._@=+]+\b', content, re.IGNORECASE):
+            val = m.group(0)
+            items.append({"link": "[AWS ARN FOUND] " + val, "priority": "MEDIUM"})
+
+        # Generic long base64-like or hex values near aws key names (fallback)
+        # Search for keys names then capture nearby quoted values
+        nearby_key_regex = re.compile(r'(?:(?:accessKeyId|aws_access_key_id|secretAccessKey|aws_secret_access_key|aws_session_token|access_key_id|secret_key))\s*[:=]\s*["\']?([A-Za-z0-9/+=\-_:]{16,})["\']?', re.IGNORECASE)
+        for m in nearby_key_regex.finditer(content):
+            val = m.group(1)
+            if not val:
+                continue
+            ent = _shannon_entropy(val)
+            # consider long/high-entropy values as suspicious
+            if ent >= 3.5 or len(val) >= 30:
+                items.append({"link": "[AWS KEY FOUND] (near key) %s (conf=%s)" % (_mask(val), "HIGH" if ent >= 3.5 else "MEDIUM"), "priority": "CRITICAL" if ent >= 3.5 else "MEDIUM"})
 
         # dedupe per file
         seen = set()
