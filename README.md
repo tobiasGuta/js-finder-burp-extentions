@@ -29,3 +29,100 @@ BurpJSLinkFinder-Enhanced is a Burp Suite extension (Jython 2.7) that extracts e
 
 https://github.com/user-attachments/assets/ba8976cc-4f77-4641-acd2-360bd16f123e
 
+# Endpoint and Key Detection Rules
+
+## 1. Suspicious/Hidden Endpoint Detection in JS
+
+Detects endpoints used in JavaScript HTTP/request functions, such as:
+
+```javascript
+
+$http.get('/path')
+
+$http.post('/path')
+
+fetch('/path')
+
+axios.get('/path')
+
+axios.post('/path')
+
+XMLHttpRequest.open('GET', '/path')
+```
+
+Labels: [SUSPICIOUS ENDPOINT FOUND]
+
+Priority: HIGH
+
+## 2\. Generic Endpoint Patterns
+
+Detects URLs and paths using broad regex patterns:
+
+Full URLs (e.g., https://...)
+
+Strings that look like endpoints or file paths (e.g., /api/v1/user, login)
+
+Labels: No special label
+
+Priority: LOW (default)
+
+## 3\. String Concatenation Endpoints
+
+Detects endpoints built by concatenating strings, e.g.:
+
+```bash
+
+"api/" + "v1/user"
+```
+
+Labels: No special label
+
+Priority: LOW (default)
+
+## 4\. Base64/Hex Decoded Endpoints
+
+Detects endpoints hidden in base64 or hex-encoded strings by decoding and re-parsing them.
+
+Labels: No special label (priority LOW by default, or "DECODED" if found via decoding)
+
+## 5\. Private Key Detection
+
+Detects private key blocks (RSA, DSA, EC, etc.) in the content.
+
+Labels: [PRIVATE KEY FOUND]
+
+Priority: CRITICAL (highlighted red)
+
+## 6\. AWS Credential Detection
+
+Detects AWS Access Key IDs and Secret Access Keys in the content.
+
+Labels: [AWS KEY FOUND]
+
+Priority: CRITICAL (highlighted orange)
+
+## 7\. Config-style Endpoint Detection
+
+Detects endpoints in config-like objects, such as:
+
+```bash
+{
+
+  "path": "...",
+
+  "linkUrl": "...",
+
+  "baseUrl": "...",
+
+  "allowedRoutes": ["/reset-password", ...],
+
+  "routes": ["reset-password", ...]
+
+}
+```
+
+Relative endpoints (not starting with / or http) are marked as (relative)
+
+Labels: [CONFIG ENDPOINT FOUND]
+
+Priority: MEDIUM (highlighted teal)
