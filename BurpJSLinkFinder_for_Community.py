@@ -241,6 +241,9 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                         elif str(value).startswith("[SUSPICIOUS ENDPOINT FOUND]"):
                             c.setBackground(Color(102, 0, 204))  # Purple
                             c.setForeground(Color.WHITE)
+                        elif str(value).startswith("[CONFIG ENDPOINT FOUND]"):
+                            c.setBackground(Color(0, 153, 153))  # Teal
+                            c.setForeground(Color.WHITE)
                         else:
                             if isSelected:
                                 c.setBackground(table.getSelectionBackground())
@@ -675,6 +678,46 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 items.append({
                     "link": "[AWS KEY FOUND] " + key_val,
                     "priority": "CRITICAL"
+                })
+
+        # --- Config-style endpoint detection ---
+        config_keys = [
+            "path", "linkUrl", "anonRedirectPath", "baseUrl", "anonRedirect", "redirectPath"
+        ]
+        array_keys = [
+            "allowedRoutes", "routes"
+        ]
+        # Match: "path": "something", 'path': 'something', etc. (even without leading slash)
+        config_pattern = re.compile(
+            r'["\'](' + '|'.join(config_keys) + r')["\']\s*:\s*["\']([^"\']+)["\']',
+            re.IGNORECASE
+        )
+        for m in config_pattern.finditer(content):
+            endpoint = m.group(2)
+            # Highlight all, but if not absolute, add a note
+            label = "[CONFIG ENDPOINT FOUND] "
+            if not endpoint.startswith("/") and not endpoint.startswith("http"):
+                label += "(relative) "
+            items.append({
+                "link": label + endpoint,
+                "priority": "MEDIUM"
+            })
+
+        # Match arrays: allowedRoutes: ["/reset-password", "/new-password"], routes: ["reset-password", ...]
+        array_pattern = re.compile(
+            r'["\'](' + '|'.join(array_keys) + r')["\']\s*:\s*\[([^\]]+)\]',
+            re.IGNORECASE
+        )
+        for m in array_pattern.finditer(content):
+            arr_content = m.group(2)
+            # Find all string values in the array
+            for ep in re.findall(r'["\']([^"\']+)["\']', arr_content):
+                label = "[CONFIG ENDPOINT FOUND] "
+                if not ep.startswith("/") and not ep.startswith("http"):
+                    label += "(relative) "
+                items.append({
+                    "link": label + ep,
+                    "priority": "MEDIUM"
                 })
 
         # dedupe per file
