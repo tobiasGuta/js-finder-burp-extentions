@@ -127,9 +127,14 @@ Labels: [CONFIG ENDPOINT FOUND]
 
 Priority: MEDIUM (highlighted teal)
 
+# Test_BurpJSLinkFinder_for_Community.py
+
+This version contains the regex from https://github.com/ResidualLaugh/FindSomething/blob/master/background.js
+
 # Support
 If my tool helped you land a bug bounty, consider buying me a coffee ☕️ as a small thank-you! Everything I build is free, but a little support helps me keep improving and creating more cool stuff ❤️
 ---
+
 
 <div align="center">
   <h3>☕ Support My Journey</h3>
