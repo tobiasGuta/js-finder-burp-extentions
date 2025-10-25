@@ -38,46 +38,7 @@ def safe_print(pw, msg):
     except:
         pass
 
-def attempt_base64_decode(s):
-    try:
-        padding = len(s) % 4
-        if padding:
-            s += '=' * (4 - padding)
-        dec = base64.b64decode(s)
-        try:
-            text = dec.decode('utf-8')
-        except:
-            text = None
-        return text
-    except Exception:
-        return None
-
-def attempt_hex_decode(s):
-    try:
-        if re.match('^[0-9a-fA-F]{6,}$', s):
-            dec = binascii.unhexlify(s)
-            try:
-                return dec.decode('utf-8')
-            except:
-                return None
-    except Exception:
-        pass
-    return None
-
-# new: lightweight Shannon entropy estimator
-def _shannon_entropy(s):
-    if not s:
-        return 0.0
-    freq = {}
-    for ch in s:
-        freq[ch] = freq.get(ch, 0) + 1
-    entropy = 0.0
-    length = float(len(s))
-    for v in freq.values():
-        p = v / length
-        entropy -= p * math.log(p, 2)
-    return entropy
-
+# Note: detection helpers (base64/hex/entropy) have been removed to ensure only regex.txt matches are used.
 # KeyAdapter wrapper (must be defined for addKeyListener)
 class SearchKeyAdapter(KeyAdapter):
     def __init__(self, outer):
@@ -278,34 +239,10 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 c = DefaultTableCellRenderer.getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, column)
                 try:
                     if column == 0 and value:
-                        if str(value).startswith("[PRIVATE KEY FOUND]"):
-                            c.setBackground(Color.RED)
-                            c.setForeground(Color.WHITE)
-                        elif str(value).startswith("[AWS KEY FOUND]"):
-                            c.setBackground(Color.ORANGE)
+                        # Only highlight nuclei matches (everything else is treated as normal)
+                        if str(value).startswith("[NUCLEI MATCH]"):
+                            c.setBackground(Color(204, 255, 255))  # light cyan for nuclei hits
                             c.setForeground(Color.BLACK)
-                        elif str(value).startswith("[SUSPICIOUS ENDPOINT FOUND]"):
-                            c.setBackground(Color(102, 0, 204))  # Purple
-                            c.setForeground(Color.WHITE)
-                        elif str(value).startswith("[CONFIG ENDPOINT FOUND]"):
-                            c.setBackground(Color(0, 153, 153))  # Teal
-                            c.setForeground(Color.WHITE)
-
-                        # -- Added token highlights --
-                        elif str(value).startswith("[JWT FOUND]"):
-                            c.setBackground(Color(153, 0, 0))  # Dark red
-                            c.setForeground(Color.WHITE)
-                        elif str(value).startswith("[AUTH BEARER FOUND]"):
-                            c.setBackground(Color(255, 102, 0))  # Orange
-                            c.setForeground(Color.BLACK)
-                        elif str(value).startswith("[NAMED TOKEN FOUND]"):
-                            c.setBackground(Color(204, 102, 255))  # Light purple
-                            c.setForeground(Color.BLACK)
-                        elif str(value).startswith("[HIGH-ENTROPY TOKEN (context)]"):
-                            c.setBackground(Color(255, 204, 0))  # Yellow
-                            c.setForeground(Color.BLACK)
-                        # -- end added token highlights --
-
                         else:
                             if isSelected:
                                 c.setBackground(table.getSelectionBackground())
